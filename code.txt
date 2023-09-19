@@ -1,0 +1,119 @@
+import numpy as np
+import pandas as pd
+ 
+# here transform data containing just 1 column into columns of 256 and 16, so as to make prediction run on it..
+def transform(futureCount, pastCount, slidingWindow, currentDataSet):
+    M = pastCount + futureCount    #Number of samples per row (sample + target)
+    #indexes
+    if slidingWindow:
+        I = np.arange(M) + np.arange(currentDataSet.shape[0] - M + 1).reshape(-1, 1)
+    else:
+        if currentDataSet.shape[0]%M == 0:
+            I = np.arange(M)+np.arange(0,currentDataSet.shape[0],M).reshape(-1,1)
+            
+        else:
+            I = np.arange(M)+np.arange(0,currentDataSet.shape[0] -M,M).reshape(-1,1)
+        
+    B = currentDataSet[I].reshape(-1, M * currentDataSet.shape[1], currentDataSet.shape[2])
+    ci = pastCount * currentDataSet.shape[1]    #Number of features per sample
+    return B[:, :ci], B[:, ci:] #Sample matrix, Target matrix
+
+#data file path
+data = 'input/bitstampUSD_1-min_data_2012-01-01_to_2018-03-27.csv'
+
+print('Reading data files ...')
+#Columns of price data to use
+columns = ['Close']
+dataframe = pd.read_csv(data)
+time_stamps = dataframe['Timestamp']
+dataframe = dataframe[columns]
+original_dataframe = pd.read_csv(data)[columns]
+print('Files read !!')
+
+from sklearn.preprocessing import MinMaxScaler
+scaler = MinMaxScaler()
+
+print('Normalizing data ...')
+# normalization
+for c in columns:
+    dataframe[c] = scaler.fit_transform(dataframe[c].values.reshape(-1,1))
+
+#Features are input sample dimensions(channels)
+A = np.array(dataframe)[:,None]
+
+original_A = np.array(original_dataframe)[:,None]
+time_stamps = np.array(time_stamps)[:,None,None]
+
+print('Transforming Data into X and labels(Y)')
+#Make samples of temporal sequences of pricing data (channel)
+NPS, NFS = 256, 16         #Number of past and future samples
+datas, labels = transform(NPS, NFS, False, A)
+input_times, output_times = transform(NPS, NFS, False,time_stamps)
+original_inputs, original_outputs = transform(NPS, NFS, False,original_A)
+
+original_datas=np.array(original_dataframe)
+
+print('Splitting data into train and test date.. 70-30 rule')
+#split training validation .. 70 - 30 rule
+training_size = int(0.7* datas.shape[0])
+training_datas = datas[:training_size,:,:]
+training_labels = labels[:training_size,:,0]
+validation_datas = datas[training_size:,:,:]
+validation_labels = labels[training_size:,:,0]
+validation_original_outputs = original_outputs[training_size:,:,:]
+validation_original_inputs = original_inputs[training_size:,:,:]
+validation_input_times = input_times[training_size:,:,:]
+validation_output_times = output_times[training_size:,:,:]
+
+# maintaining data sets.. with original values
+ground_true = np.append(validation_original_inputs,validation_original_outputs, axis=1)
+
+ground_true_times = np.append(validation_input_times,validation_output_times, axis=1)
+
+from sklearn.linear_model import LinearRegression
+#predicting values..
+print('running Linear Regression..')
+predicted = np.zeros(validation_labels.shape)
+for i in range(16):
+    lr = LinearRegression()
+    lr.fit(training_datas[:,:,0], training_labels[:,i])
+    predicted[:,i] = lr.predict(validation_datas[:,:,0])
+
+# formating shape of datasets so that plotting and comparison of predicted and original values are possible
+predicted_inverted = []
+
+scaler.fit(original_datas[:,0].reshape(-1,1))
+predicted_inverted.append(scaler.inverse_transform(predicted))
+
+ground_true_df = pd.DataFrame()
+#get only the close data. from our maintained original datsets
+ground_true_df['value'] = ground_true[:,:,0].reshape(-1)
+
+ground_true_times = ground_true_times.reshape(-1)
+ground_true_df['times'] = pd.to_datetime(ground_true_times, unit='s')
+
+# since we are appending in the first dimension
+predicted_inverted = np.array(predicted_inverted)[0,:,:].reshape(-1)
+
+validation_output_times = pd.to_datetime(validation_output_times.reshape(-1), unit='s')
+
+prediction_df = pd.DataFrame()
+prediction_df['times'] = validation_output_times
+prediction_df['value'] = predicted_inverted
+
+
+prediction_df = prediction_df.loc[(prediction_df["times"].dt.year == 2017 )&(prediction_df["times"].dt.month > 5 ),: ]
+ground_true_df = ground_true_df.loc[(ground_true_df["times"].dt.year == 2017 )&(ground_true_df["times"].dt.month >5 ),:]
+
+print('Plotting actual and predicted graphs..')
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(20,10))
+plt.plot(ground_true_df.times,ground_true_df.value, label = 'Actual')
+# plt.plot(prediction_df.times,prediction_df.value, label = 'Predicted')
+plt.plot(prediction_df.times,prediction_df.value,'ro', label='Predicted')
+plt.legend(loc='upper left')
+plt.show()
+
+from sklearn.metrics import mean_squared_error
+print("Mean Prediction Error : ",mean_squared_error(validation_original_outputs[:,:,0].reshape(-1),predicted_inverted))
